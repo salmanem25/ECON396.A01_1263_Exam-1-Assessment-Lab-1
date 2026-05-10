@@ -1,0 +1,345 @@
+---
+title: "Exam 1 / Assessment Lab 1"
+author: "Salman Rashid"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(stringr)
+```
+
+#### 1. What are the basic R data structures? What are the differences between them? In what context would you use one versus the other?
+
+R has six main data structures. They differ in what they store and when you should use them.
+
+1.  Vector A vector stores values of one single type (numeric, character, or logical). Use it when you have one variable, like years, yields, or names.
+
+2.  Matrix A matrix is 2‑dimensional (rows × columns) and stores only one type of data. Use it for numeric calculations, linear algebra, or model inputs.
+
+3.  Array An array is like a matrix but can have more than two dimensions. Use it when your data vary by year × county × crop × scenario, etc.
+
+4.  List A list can store different types of objects together (vectors, data frames, models). Use it when your objects don’t have the same structure.
+
+5.  Factor A factor stores categorical variables (county, crop, treatment group). Use it when you need groups for modeling or plotting.
+
+6.  Data Frame / Tibble A data frame stores columns of different types, all the same length. A tibble is a modern version that prints cleaner and works well with tidyverse. Use it for almost all real datasets.
+
+#### 2. You are provided a folder with three location (county) names, each of which has subfolders for one or two crops, which in turn has a data file.
+
+##### a. Iterate through the folders to read all the files and merge them into a single data frame. You can use a “loop” to iterate or for efficiency check out the list.files() function.
+
+```{r}
+documents_folder <- path.expand("/home/salmanm/Documents")
+zip_file <- file.path(documents_folder, "CropModelResults.zip")
+extract_folder <- file.path(documents_folder, "CropModelResults_unzipped")
+
+if (!dir.exists(extract_folder)) {
+  unzip(zip_file, exdir = extract_folder)
+}
+
+all_files <- list.files(
+  path = extract_folder,
+  pattern = "seasonal_result\\.csv$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+all_files <- all_files[!str_detect(all_files, "__MACOSX")]
+
+merged_df <- map_dfr(all_files, read_csv, show_col_types = FALSE)
+
+glimpse(merged_df)
+```
+
+##### b. Add four additional columns to the merged dataframe corresponding to the county name, crop name, latitude and longitude of the data. You must get this information from the directory structure you are looping through or the strings returned by the call to list.files().
+
+```{r}
+merged_df <- map_dfr(all_files, function(file_path) {
+
+  temp <- read_csv(file_path, show_col_types = FALSE)
+
+  clean_path <- str_replace_all(file_path, "\\\\", "/")
+  parts <- str_split(clean_path, "/", simplify = TRUE) |> as.character()
+
+  # FIX: choose the LAST matching folder
+  idx <- max(which(str_detect(parts, "^CropModelResults")))
+
+  county <- parts[idx + 1]
+  crop <- parts[idx + 2]
+  loc <- parts[idx + 3]
+
+  lat <- as.numeric(str_extract(loc, "^[0-9.]+"))
+  lon <- -as.numeric(str_extract(loc, "(?<=N)[0-9.]+(?=W)"))
+
+  temp |> mutate(
+    county_name = county,
+    crop_name = crop,
+    latitude = lat,
+    longitude = lon
+  )
+})
+
+merged_df |> 
+  select(county_name, crop_name, latitude, longitude) |> 
+  distinct()
+```
+
+##### c. Rename the column irrig to irrigation_demand and precip to precipitation and export the dataframe as a csv file.
+
+```{r}
+merged_df <- merged_df |>
+  rename(
+    irrigation_demand = irrig,
+    precipitation = precip
+  ) |>
+  mutate(
+    date = as.Date(str_extract(`YYYY-MM-DD(DOY)`, "^\\d{4}-\\d{2}-\\d{2}")),
+    year = as.integer(format(date, "%Y"))
+  )
+
+write_csv(merged_df, file.path(documents_folder, "crop_model_merged.csv"))
+```
+
+##### d. Summarize the annual irrigation demand by crop name and county name.
+
+```{r}
+annual_irrigation <- merged_df |>
+  group_by(county_name, crop_name, year) |>
+  summarize(
+    annual_irrigation_demand = sum(irrigation_demand, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(
+  annual_irrigation,
+  file.path(documents_folder, "annual_irrigation_demand_summary.csv")
+)
+
+annual_irrigation |> head()
+```
+
+##### e. What is the average yield of Winter Wheat in Walla Walla at 46.03125N118.40625W for the year ranges (1981-1990), (1991-2000), and (2001-2019)?
+
+```{r}
+winter_wheat_summary <- merged_df |>
+  filter(
+    county_name == "WallaWalla",
+    crop_name == "Winter_Wheat",
+    latitude == 46.03125,
+    longitude == -118.40625,
+    year >= 1981, year <= 2019
+  ) |>
+  mutate(
+    year_range = case_when(
+      year >= 1981 & year <= 1990 ~ "1981-1990",
+      year >= 1991 & year <= 2000 ~ "1991-2000",
+      year >= 2001 & year <= 2019 ~ "2001-2019"
+    )
+  ) |>
+  group_by(year_range) |>
+  summarize(average_yield = mean(yield, na.rm = TRUE))
+
+write_csv(
+  winter_wheat_summary,
+  file.path(documents_folder, "winter_wheat_walla_walla_yield_ranges.csv")
+)
+
+winter_wheat_summary
+```
+
+##### f. Which location has highest yield (average) for the time period (2001-2019) for grain corn?
+
+```{r}
+corn_yield <- merged_df |>
+  filter(
+    crop_name == "Corn_grain",
+    year >= 2001, year <= 2019
+  ) |>
+  group_by(county_name, latitude, longitude) |>
+  summarize(
+    average_yield = mean(yield, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(average_yield))
+
+write_csv(
+  corn_yield,
+  file.path(documents_folder, "grain_corn_2001_2019_avg_yield_by_location.csv")
+)
+
+corn_yield |> slice(1)
+```
+
+#### 3. Was the data provided to you well described ? If not, what information was missing? Comment on what kind of metadata (description about the data) should be included as best practice while sharing datasets?
+
+The dataset was usable, but not well documented.
+Several essential pieces of metadata were missing:
+
+Missing Information
+  Definitions of each variable
+  Units (kg/ha? lb/acre?)
+  Whether irrigation/precipitation are daily or seasonal
+  Description of the crop model used
+  Weather, soil, and management inputs
+  Meaning of planting/harvest dates
+  Whether values are simulated or observed
+  Assumptions and limitations
+  Citation or contact information
+
+Best‑Practice Metadata Should Include
+  Dataset purpose and description
+  Variable names, definitions, and units
+  Spatial and temporal coverage
+  Data sources and modeling methods
+  Missing value codes
+  Folder structure explanation
+  README file for reproducibility
+    
+#### 4. Extra Credit (Optional) Create an R Markdown file with different tabs for each of the six parts of question 2. In a seventh tab add the Github link which has your R script/ R markdown file and the csv file generated from 2 (c)
+
+# Question 2 {.tabset}
+
+## 2(a) — Read and Merge All Files
+```{r}
+documents_folder <- path.expand("/home/salmanm/Documents")
+zip_file <- file.path(documents_folder, "CropModelResults.zip")
+extract_folder <- file.path(documents_folder, "CropModelResults_unzipped")
+
+if (!dir.exists(extract_folder)) {
+  unzip(zip_file, exdir = extract_folder)
+}
+
+all_files <- list.files(
+  path = extract_folder,
+  pattern = "seasonal_result\\.csv$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+all_files <- all_files[!str_detect(all_files, "__MACOSX")]
+
+merged_df <- map_dfr(all_files, read_csv, show_col_types = FALSE)
+
+glimpse(merged_df)
+```
+
+## 2(b) — Add County, Crop, Latitude, Longitude
+```{r}
+merged_df <- map_dfr(all_files, function(file_path) {
+
+  temp <- read_csv(file_path, show_col_types = FALSE)
+
+  clean_path <- str_replace_all(file_path, "\\\\", "/")
+  parts <- str_split(clean_path, "/", simplify = TRUE) |> as.character()
+
+  # FIX: choose the LAST matching folder
+  idx <- max(which(str_detect(parts, "^CropModelResults")))
+
+  county <- parts[idx + 1]
+  crop <- parts[idx + 2]
+  loc <- parts[idx + 3]
+
+  lat <- as.numeric(str_extract(loc, "^[0-9.]+"))
+  lon <- -as.numeric(str_extract(loc, "(?<=N)[0-9.]+(?=W)"))
+
+  temp |> mutate(
+    county_name = county,
+    crop_name = crop,
+    latitude = lat,
+    longitude = lon
+  )
+})
+
+merged_df |> 
+  select(county_name, crop_name, latitude, longitude) |> 
+  distinct()
+```
+
+## 2(c) — Rename Columns and Export CSV
+```{r}
+merged_df <- merged_df |>
+  rename(
+    irrigation_demand = irrig,
+    precipitation = precip
+  ) |>
+  mutate(
+    date = as.Date(str_extract(`YYYY-MM-DD(DOY)`, "^\\d{4}-\\d{2}-\\d{2}")),
+    year = as.integer(format(date, "%Y"))
+  )
+
+write_csv(merged_df, file.path(documents_folder, "crop_model_merged.csv"))
+```
+
+## 2(d) — Annual Irrigation Demand Summary
+```{r}
+annual_irrigation <- merged_df |>
+  group_by(county_name, crop_name, year) |>
+  summarize(
+    annual_irrigation_demand = sum(irrigation_demand, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(
+  annual_irrigation,
+  file.path(documents_folder, "annual_irrigation_demand_summary.csv")
+)
+
+annual_irrigation |> head()
+```
+
+## 2(e) — Winter Wheat Yield (Three Time Ranges)
+```{r}
+winter_wheat_summary <- merged_df |>
+  filter(
+    county_name == "WallaWalla",
+    crop_name == "Winter_Wheat",
+    latitude == 46.03125,
+    longitude == -118.40625,
+    year >= 1981, year <= 2019
+  ) |>
+  mutate(
+    year_range = case_when(
+      year >= 1981 & year <= 1990 ~ "1981-1990",
+      year >= 1991 & year <= 2000 ~ "1991-2000",
+      year >= 2001 & year <= 2019 ~ "2001-2019"
+    )
+  ) |>
+  group_by(year_range) |>
+  summarize(average_yield = mean(yield, na.rm = TRUE))
+
+write_csv(
+  winter_wheat_summary,
+  file.path(documents_folder, "winter_wheat_walla_walla_yield_ranges.csv")
+)
+
+winter_wheat_summary
+```
+
+## 2(f) — Highest Grain Corn Yield (2001–2019)
+```{r}
+corn_yield <- merged_df |>
+  filter(
+    crop_name == "Corn_grain",
+    year >= 2001, year <= 2019
+  ) |>
+  group_by(county_name, latitude, longitude) |>
+  summarize(
+    average_yield = mean(yield, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(average_yield))
+
+write_csv(
+  corn_yield,
+  file.path(documents_folder, "grain_corn_2001_2019_avg_yield_by_location.csv")
+)
+
+corn_yield |> slice(1)
+```
+
+###### GitHub Link
+GitHub Repository Link:
+https://github.com/salmanem25/ECON396.A01_1263_Exam-1-Assessment-Lab-1.git
